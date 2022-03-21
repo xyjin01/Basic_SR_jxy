@@ -386,6 +386,66 @@ class GANLoss(nn.Module):
         # loss_weight is always 1.0 for discriminators
         return loss if is_disc else loss * self.loss_weight
 
+@LOSS_REGISTRY.register()
+class CategoricalLoss(nn.Module):
+    def __init__(self, num_outcomes=51, positive_skew=10, negative_skew=-10, loss_weight=float(5e-3),relativisticG = True):
+        super(CategoricalLoss, self).__init__()
+        self.loss_weight = loss_weight
+        self.atoms = num_outcomes
+        self.v_max = positive_skew
+        self.v_min = negative_skew
+        self.relativisticG = relativisticG
+        self.supports = torch.linspace(self.v_min, self.v_max, self.atoms).view(1, 1, self.atoms).cuda() # RL: [bs, #action, #quantiles]
+        self.delta = (self.v_max - self.v_min) / (self.atoms - 1)
+
+    def forward(self, anchor, feature, skewness=0.0, is_disc=False):
+        batch_size = feature.shape[0]
+        skew = torch.zeros((batch_size, self.atoms)).cuda().fill_(skewness)
+
+        # experiment to adjust KL divergence between positive/negative anchors
+        Tz = skew + self.supports.view(1, -1) * torch.ones((batch_size, 1)).to(torch.float).view(-1, 1).cuda()
+        Tz = Tz.clamp(self.v_min, self.v_max)
+        b = (Tz - self.v_min) / self.delta
+        l = b.floor().to(torch.int64)
+        u = b.ceil().to(torch.int64)
+        l[(u > 0) * (l == u)] -= 1
+        u[(l < (self.atoms - 1)) * (l == u)] += 1
+        offset = torch.linspace(0, (batch_size - 1) * self.atoms, batch_size).to(torch.int64).unsqueeze(dim=1).expand(batch_size, self.atoms).cuda()
+        skewed_anchor = torch.zeros(batch_size, self.atoms).cuda()
+        skewed_anchor.view(-1).index_add_(0, (l + offset).view(-1), (anchor * (u.float() - b)).view(-1))
+        skewed_anchor.view(-1).index_add_(0, (u + offset).view(-1), (anchor * (b - l.float())).view(-1))
+
+        loss = -(skewed_anchor * (feature + 1e-16).log()).sum(-1).mean()
+
+        return loss if is_disc else loss * self.loss_weight
+
+
+
+    # def to(self, device):
+    #     self.device = device
+    #     self.supports = self.supports.to(device)
+    #
+    # def forward(self, anchor, feature, skewness=0.0, is_disc=False):
+    #     batch_size = feature.shape[0]
+    #     skew = torch.zeros((batch_size, self.atoms)).to(self.device).fill_(skewness)
+    #
+    #     # experiment to adjust KL divergence between positive/negative anchors
+    #     Tz = skew + self.supports.view(1, -1) * torch.ones((batch_size, 1)).to(torch.float).view(-1, 1).to(self.device)
+    #     Tz = Tz.clamp(self.v_min, self.v_max)
+    #     b = (Tz - self.v_min) / self.delta
+    #     l = b.floor().to(torch.int64)
+    #     u = b.ceil().to(torch.int64)
+    #     l[(u > 0) * (l == u)] -= 1
+    #     u[(l < (self.atoms - 1)) * (l == u)] += 1
+    #     offset = torch.linspace(0, (batch_size - 1) * self.atoms, batch_size).to(torch.int64).unsqueeze(dim=1).expand(batch_size, self.atoms).to(self.device)
+    #     skewed_anchor = torch.zeros(batch_size, self.atoms).to(self.device)
+    #     skewed_anchor.view(-1).index_add_(0, (l + offset).view(-1), (anchor * (u.float() - b)).view(-1))
+    #     skewed_anchor.view(-1).index_add_(0, (u + offset).view(-1), (anchor * (b - l.float())).view(-1))
+    #
+    #     loss = -(skewed_anchor * (feature + 1e-16).log()).sum(-1).mean()
+    #
+    #     return loss if is_disc else loss * self.loss_weight
+
 
 @LOSS_REGISTRY.register()
 class MultiScaleGANLoss(GANLoss):
